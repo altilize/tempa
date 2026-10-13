@@ -1086,7 +1086,15 @@ async function boot() {
   $$('.tabbar [data-icon]').forEach((b) => { b.insertAdjacentHTML('afterbegin', icon(b.dataset.icon)); });
   await load();
   render();
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    // Kalau service worker baru mengambil alih, muat ulang sekali supaya langsung pakai versi terbaru.
+    const hadController = Boolean(navigator.serviceWorker.controller);
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (hadController && !reloaded) { reloaded = true; location.reload(); }
+    });
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then((r) => r.update()).catch(() => {});
+  }
 }
 
 boot();

@@ -33,7 +33,7 @@ Key hanya disimpan di HP dan tidak ikut ke file backup. Jangan taruh key di kode
 
 ## Update aplikasi
 
-Upload ulang file yang berubah, lalu naikkan `VERSION` di `sw.js` (misalnya `tempa-v2`). HP akan memakai versi baru setelah aplikasi dibuka dua kali.
+Upload ulang file yang berubah, lalu naikkan `VERSION` di `sw.js` (misalnya `tempa-v2`). Aplikasi di HP otomatis memuat ulang ke versi baru saat dibuka.
 
 ## Backup
 

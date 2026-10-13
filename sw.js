@@ -1,5 +1,5 @@
 // Service worker: aplikasi tetap terbuka tanpa internet. Naikkan VERSION setiap rilis.
-const VERSION = 'tempa-v2';
+const VERSION = 'tempa-v3';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/store.js', 'js/calc.js', 'js/game.js', 'js/ai.js', 'js/chart.js', 'js/util.js',
@@ -7,7 +7,12 @@ const SHELL = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache: 'reload' melewati cache HTTP supaya yang tersimpan benar-benar file terbaru dari server.
+  e.waitUntil(
+    caches.open(VERSION)
+      .then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' }))))
+      .then(() => self.skipWaiting()),
+  );
 });
 
 self.addEventListener('activate', (e) => {
@@ -23,15 +28,25 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(req.url);
   const isFont = url.hostname === 'fonts.googleapis.com' || url.hostname === 'fonts.gstatic.com';
   if (url.origin !== location.origin && !isFont) return;
-  // Stale-while-revalidate: tampilkan versi cache, perbarui di belakang.
   e.respondWith(
     caches.open(VERSION).then(async (cache) => {
-      const cached = await cache.match(req, { ignoreSearch: true });
-      const fresh = fetch(req).then((res) => {
-        if (res.ok || res.type === 'opaque') cache.put(req, res.clone());
+      // Font jarang berubah: cache dulu.
+      if (isFont) {
+        const hit = await cache.match(req);
+        if (hit) return hit;
+        const res = await fetch(req);
+        cache.put(req, res.clone());
         return res;
-      }).catch(() => cached);
-      return cached || fresh;
+      }
+      // File aplikasi: ambil dari jaringan supaya update langsung terasa, pakai cache kalau offline.
+      try {
+        // Pakai URL, bukan objek request: request navigasi tidak boleh dibuat ulang dengan opsi baru.
+        const res = await fetch(req.url, { cache: 'no-cache' });
+        if (res.ok) cache.put(req, res.clone());
+        return res;
+      } catch {
+        return (await cache.match(req, { ignoreSearch: true })) || Response.error();
+      }
     }),
   );
 });
