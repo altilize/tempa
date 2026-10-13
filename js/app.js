@@ -419,7 +419,7 @@ function aiFields(ai) {
       ${select('AI untuk foto', 'ai.visionProvider', ai.visionProvider, [['gemini', 'Gemini'], ['groq', 'Groq']])}
     </div>
     <details><summary>Nama model (lanjutan)</summary>
-      <p class="hint">Ganti hanya kalau muncul error "model tidak tersedia". Kosongkan untuk kembali ke default.</p>
+      <p class="hint">Diisi otomatis saat tombol Tes ditekan. Kosongkan untuk kembali ke default.</p>
       ${field('Groq teks', 'ai.groqModel', ai.groqModel, 'spellcheck="false"')}
       ${field('Groq foto', 'ai.groqVisionModel', ai.groqVisionModel, 'spellcheck="false"')}
       ${field('Gemini', 'ai.geminiModel', ai.geminiModel, 'spellcheck="false"')}
@@ -1031,8 +1031,18 @@ const ACTIONS = {
     const old = state.ai;
     state.ai = ai;
     el.textContent = '...';
-    try { await testProvider(el.dataset.p); el.textContent = '✓ OK'; el.classList.add('ok'); toast(`${el.dataset.p === 'groq' ? 'Groq' : 'Gemini'} tersambung`, { kind: 'good' }); }
-    catch (e) { el.textContent = '✗'; toast(e.message, { kind: 'bad', duration: 6000 }); }
+    try {
+      const model = await testProvider(el.dataset.p);
+      // Simpan model hasil deteksi otomatis ke form dan ke data asli.
+      for (const f of ['groqModel', 'groqVisionModel', 'geminiModel']) {
+        old[f] = ai[f];
+        const inp = form.querySelector(`[name="ai.${f}"]`);
+        if (inp) inp.value = ai[f];
+      }
+      save();
+      el.textContent = '✓ OK'; el.classList.add('ok');
+      toast(`${el.dataset.p === 'groq' ? 'Groq' : 'Gemini'} tersambung (${model})`, { kind: 'good' });
+    } catch (e) { el.textContent = '✗'; toast(e.message, { kind: 'bad', duration: 6000 }); }
     finally { state.ai = old; }
   },
   export: () => {

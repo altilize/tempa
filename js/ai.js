@@ -1,6 +1,6 @@
 // Integrasi AI lewat endpoint kompatibel OpenAI milik Groq dan Google Gemini.
 
-import { state } from './store.js';
+import { state, save } from './store.js';
 import { dayStats, latestWeight, targets, eta, monthSpend, streak, lastNDays, trend } from './calc.js';
 import { dateKey, fmtRp, fmtNum, fmtKg } from './util.js';
 
@@ -9,7 +9,58 @@ const ENDPOINTS = {
   gemini: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions',
 };
 
+const MODELS_URL = {
+  groq: 'https://api.groq.com/openai/v1/models',
+  gemini: 'https://generativelanguage.googleapis.com/v1beta/openai/models',
+};
+
 export class AiError extends Error {}
+
+async function listModels(provider, key) {
+  try {
+    const res = await fetch(MODELS_URL[provider], { headers: { Authorization: `Bearer ${key}` } });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data.data || []).map((m) => String(m.id).replace(/^models\//, ''));
+  } catch {
+    return [];
+  }
+}
+
+const version = (id) => Number((id.match(/(\d+(?:\.\d+)?)/) || [0, 0])[1]);
+
+function bestGemini(ids) {
+  if (ids.includes('gemini-flash-latest')) return 'gemini-flash-latest';
+  const ok = ids.filter((id) => /^gemini-[\d.]+-flash/.test(id) && !/image|tts|audio|live|embed|native|computer|robotics/.test(id));
+  // Utamakan versi terbaru, versi stabil, dan bukan varian lite.
+  const score = (id) => version(id) * 10 - (/lite/.test(id) ? 3 : 0) - (/preview|exp/.test(id) ? 1 : 0);
+  return ok.sort((a, b) => score(b) - score(a))[0];
+}
+
+function bestGroq(ids, vision) {
+  const usable = ids.filter((id) => !/guard|whisper|tts|prompt|compound|embed/.test(id));
+  if (vision) return usable.find((id) => /llama-4-scout/.test(id)) || usable.find((id) => /llama-4|vision/.test(id));
+  return ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b'].find((id) => usable.includes(id))
+    || usable.find((id) => /versatile|gpt-oss|llama/.test(id));
+}
+
+// Cek daftar model milik key ini, ganti model yang sudah tidak tersedia dengan yang terbaik.
+export async function resolveModels(provider) {
+  const ai = state.ai;
+  const key = provider === 'groq' ? ai.groqKey : ai.geminiKey;
+  const ids = await listModels(provider, key);
+  if (!ids.length) return false;
+  let changed = false;
+  const fix = (field, pickBest) => {
+    if (ids.includes(ai[field])) return;
+    const best = pickBest();
+    if (best) { ai[field] = best; changed = true; }
+  };
+  if (provider === 'gemini') fix('geminiModel', () => bestGemini(ids));
+  else { fix('groqModel', () => bestGroq(ids, false)); fix('groqVisionModel', () => bestGroq(ids, true)); }
+  if (changed) save();
+  return changed;
+}
 
 function pick(kind) {
   const ai = state.ai;
@@ -25,7 +76,8 @@ function pick(kind) {
 
 export const hasAi = () => Boolean(state.ai.groqKey || state.ai.geminiKey);
 
-async function chat(kind, messages, { temperature = 0.4, maxTokens = 3000, signal, target } = {}) {
+async function chat(kind, messages, opts = {}) {
+  const { temperature = 0.4, maxTokens = 3000, signal, target, retried } = opts;
   const { provider, key, model } = target || pick(kind);
   let res;
   try {
@@ -45,7 +97,11 @@ async function chat(kind, messages, { temperature = 0.4, maxTokens = 3000, signa
     const name = provider === 'groq' ? 'Groq' : 'Gemini';
     if (res.status === 401 || res.status === 403) throw new AiError(`API key ${name} ditolak. Cek lagi di Pengaturan.`);
     if (res.status === 429) throw new AiError(`Kuota gratis ${name} sedang habis. Tunggu sebentar lalu coba lagi.`);
-    if (res.status === 404 || /model/i.test(detail)) throw new AiError(`Model "${model}" tidak tersedia di ${name}. Ganti nama model di Pengaturan. (${detail})`);
+    if (res.status === 404 || (res.status === 400 && /model/i.test(detail))) {
+      // Model sudah dipensiunkan: cari pengganti otomatis lalu coba sekali lagi.
+      if (!retried && !target && await resolveModels(provider)) return chat(kind, messages, { ...opts, retried: true });
+      throw new AiError(`Model "${model}" tidak tersedia di ${name}. (${detail})`);
+    }
     throw new AiError(`${name} error ${res.status}. ${detail}`.trim());
   }
   const data = await res.json();
@@ -164,13 +220,15 @@ export async function coachReply(history, opts) {
   return (await chat('text', msgs, { temperature: 0.7, maxTokens: 2000, ...opts })).trim();
 }
 
+// Tes key: cocokkan model dengan yang tersedia, lalu kirim pesan pendek. Mengembalikan nama model yang dipakai.
 export async function testProvider(provider) {
   const ai = state.ai;
   const key = provider === 'groq' ? ai.groqKey : ai.geminiKey;
   if (!key) throw new AiError('Key belum diisi.');
+  await resolveModels(provider);
   const model = provider === 'groq' ? ai.groqModel : ai.geminiModel;
   await chat('text', [{ role: 'user', content: 'Balas satu kata: siap' }], { maxTokens: 400, target: { provider, key, model } });
-  return true;
+  return model;
 }
 
 // Kecilkan foto ke sisi terpanjang 1024 px supaya cepat dikirim dan hemat kuota.

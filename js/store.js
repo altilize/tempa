@@ -9,7 +9,7 @@ const KEY = 'state';
 export const DEFAULT_MODELS = {
   groqModel: 'llama-3.3-70b-versatile',
   groqVisionModel: 'meta-llama/llama-4-scout-17b-16e-instruct',
-  geminiModel: 'gemini-2.5-flash',
+  geminiModel: 'gemini-flash-latest',
 };
 
 export function defaultState() {
@@ -83,6 +83,8 @@ async function idbSet(key, val) {
 // Gabungkan data tersimpan dengan default supaya field baru di versi berikutnya selalu ada.
 function migrate(saved) {
   const base = defaultState();
+  // Model lama yang sudah dibatasi Google diganti alias yang selalu menunjuk Flash terbaru.
+  if (saved.ai?.geminiModel === 'gemini-2.5-flash') saved.ai.geminiModel = DEFAULT_MODELS.geminiModel;
   return {
     ...base,
     ...saved,
