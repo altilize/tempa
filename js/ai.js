@@ -76,38 +76,94 @@ function pick(kind) {
 
 export const hasAi = () => Boolean(state.ai.groqKey || state.ai.geminiKey);
 
-async function chat(kind, messages, opts = {}) {
-  const { temperature = 0.4, maxTokens = 3000, signal, target, retried } = opts;
-  const { provider, key, model } = target || pick(kind);
-  let res;
-  try {
-    res = await fetch(ENDPOINTS[provider], {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ model, messages, temperature, max_tokens: maxTokens }),
-      signal,
-    });
-  } catch (e) {
-    if (e.name === 'AbortError') throw e;
-    throw new AiError('Tidak bisa terhubung ke AI. Cek koneksi internet kamu.');
-  }
-  if (!res.ok) {
+const NAME = { groq: 'Groq', gemini: 'Gemini' };
+const isBusy = (status) => [500, 502, 503, 504].includes(status);
+const isModelErr = (r) => r.status === 404 || (r.status === 400 && /model/i.test(r.detail));
+
+function wait(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => { clearTimeout(t); reject(new DOMException('Dibatalkan', 'AbortError')); }, { once: true });
+  });
+}
+
+// Satu permintaan ke satu model. Server penuh (5xx) dicoba ulang 2 kali dengan jeda makin lama.
+async function send({ provider, key, model }, messages, { temperature, maxTokens, signal }) {
+  for (let attempt = 0; ; attempt++) {
+    let res;
+    try {
+      res = await fetch(ENDPOINTS[provider], {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+        body: JSON.stringify({ model, messages, temperature, max_tokens: maxTokens }),
+        signal,
+      });
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+      throw new AiError('Tidak bisa terhubung ke AI. Cek koneksi internet kamu.');
+    }
+    if (res.ok) {
+      const data = await res.json();
+      const text = data?.choices?.[0]?.message?.content;
+      if (!text) throw new AiError('AI tidak memberi jawaban. Coba lagi.');
+      return { ok: true, text };
+    }
     let detail = '';
     try { detail = (await res.json())?.error?.message || ''; } catch { /* abaikan */ }
-    const name = provider === 'groq' ? 'Groq' : 'Gemini';
-    if (res.status === 401 || res.status === 403) throw new AiError(`API key ${name} ditolak. Cek lagi di Pengaturan.`);
-    if (res.status === 429) throw new AiError(`Kuota gratis ${name} sedang habis. Tunggu sebentar lalu coba lagi.`);
-    if (res.status === 404 || (res.status === 400 && /model/i.test(detail))) {
-      // Model sudah dipensiunkan: cari pengganti otomatis lalu coba sekali lagi.
-      if (!retried && !target && await resolveModels(provider)) return chat(kind, messages, { ...opts, retried: true });
-      throw new AiError(`Model "${model}" tidak tersedia di ${name}. (${detail})`);
-    }
-    throw new AiError(`${name} error ${res.status}. ${detail}`.trim());
+    if (isBusy(res.status) && attempt < 2) { await wait(1500 * 2 ** attempt, signal); continue; }
+    return { ok: false, status: res.status, detail };
   }
-  const data = await res.json();
-  const text = data?.choices?.[0]?.message?.content;
-  if (!text) throw new AiError('AI tidak memberi jawaban. Coba lagi.');
-  return text;
+}
+
+// Model Gemini lain untuk dicoba saat model utama penuh. Varian lite biasanya lebih longgar.
+async function altGemini(key, current) {
+  const ids = (await listModels('gemini', key)).filter((id) => id !== current);
+  const lite = ids.includes('gemini-flash-lite-latest') ? 'gemini-flash-lite-latest' : bestGemini(ids.filter((id) => /lite/.test(id)));
+  return lite || bestGemini(ids.filter((id) => id !== 'gemini-flash-latest'));
+}
+
+function otherProvider(kind, provider) {
+  const ai = state.ai;
+  const other = provider === 'groq' ? 'gemini' : 'groq';
+  const key = other === 'groq' ? ai.groqKey : ai.geminiKey;
+  if (!key) return null;
+  const model = other === 'gemini' ? ai.geminiModel : kind === 'vision' ? ai.groqVisionModel : ai.groqModel;
+  return { provider: other, key, model };
+}
+
+function errorFor(r, t) {
+  const name = NAME[t.provider];
+  if (r.status === 401 || r.status === 403) return new AiError(`API key ${name} ditolak. Cek lagi di Pengaturan.`);
+  if (r.status === 429) return new AiError(`Kuota gratis ${name} sedang habis. Tunggu sebentar lalu coba lagi.`);
+  if (isModelErr(r)) return new AiError(`Model "${t.model}" tidak tersedia di ${name}. (${r.detail})`);
+  if (isBusy(r.status)) {
+    const tip = state.ai.groqKey && state.ai.geminiKey ? '' : ' Isi juga key Groq di Pengaturan sebagai cadangan otomatis.';
+    return new AiError(`Server ${name} sedang penuh (${r.status}). Ini gangguan dari ${name}, bukan dari key kamu. Coba lagi 1 sampai 2 menit lagi.${tip}`);
+  }
+  return new AiError(`${name} error ${r.status}. ${r.detail}`.trim());
+}
+
+async function chat(kind, messages, opts = {}) {
+  const { temperature = 0.4, maxTokens = 3000, signal, target } = opts;
+  const o = { temperature, maxTokens, signal };
+  let t = target || pick(kind);
+  let r = await send(t, messages, o);
+  // Model sudah dipensiunkan: cari pengganti dari daftar model lalu coba lagi.
+  if (!r.ok && isModelErr(r) && await resolveModels(t.provider)) {
+    t = target ? { ...t, model: t.provider === 'gemini' ? state.ai.geminiModel : state.ai.groqModel } : pick(kind);
+    r = await send(t, messages, o);
+  }
+  // Server penuh: coba model Gemini lain, lalu provider lain kalau key-nya ada.
+  if (!r.ok && isBusy(r.status) && t.provider === 'gemini') {
+    const alt = await altGemini(t.key, t.model);
+    if (alt) { t = { ...t, model: alt }; r = await send(t, messages, o); }
+  }
+  if (!r.ok && isBusy(r.status) && !target) {
+    const other = otherProvider(kind, t.provider);
+    if (other) { t = other; r = await send(t, messages, o); }
+  }
+  if (r.ok) return r.text;
+  throw errorFor(r, t);
 }
 
 function extractJson(text) {

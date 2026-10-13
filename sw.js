@@ -1,5 +1,5 @@
 // Service worker: aplikasi tetap terbuka tanpa internet. Naikkan VERSION setiap rilis.
-const VERSION = 'tempa-v3';
+const VERSION = 'tempa-v4';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/store.js', 'js/calc.js', 'js/game.js', 'js/ai.js', 'js/chart.js', 'js/util.js',
